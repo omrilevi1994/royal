@@ -3,8 +3,10 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 
 const URL = "https://www.isrotel.co.il/deals/special-sale/main/";
-const HOTEL_KEYWORDS = ["רויאל ביץ", "רויאל ביץ׳", "רויאל ביץ'", "Royal Beach"];
-const TARGET_MONTH = "מאי";
+const HOTEL_CODE = "RB";
+const HOTEL_LABEL = "רויאל ביץ' אילת";
+const TARGET_MONTH = 5;
+const TARGET_YEAR = 2026;
 const STATE_FILE = "state.json";
 
 const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } = process.env;
@@ -37,25 +39,44 @@ async function sendTelegram(text) {
   if (!res.ok) throw new Error(`Telegram error ${res.status}: ${await res.text()}`);
 }
 
-function hashDeal(s) {
+function hashStr(s) {
   return createHash("sha256").update(s).digest("hex").slice(0, 16);
+}
+
+function dateRangeOverlapsTarget(startStr, endStr) {
+  if (!startStr) return false;
+  const start = new Date(startStr);
+  const end = endStr ? new Date(endStr) : start;
+  const monthStart = new Date(Date.UTC(TARGET_YEAR, TARGET_MONTH - 1, 1));
+  const monthEnd = new Date(Date.UTC(TARGET_YEAR, TARGET_MONTH, 0, 23, 59, 59));
+  return start <= monthEnd && end >= monthStart;
 }
 
 function findDeals(html) {
   const $ = cheerio.load(html);
   const deals = [];
-  const seenBlocks = new Set();
 
-  $("body *").each((_, el) => {
+  $(`article.card--deal[data-hotel="${HOTEL_CODE}"]`).each((_, el) => {
     const $el = $(el);
-    if ($el.children().length > 5) return;
-    const text = $el.text().replace(/\s+/g, " ").trim();
-    if (text.length < 20 || text.length > 600) return;
-    if (!HOTEL_KEYWORDS.some(k => text.includes(k))) return;
-    if (!text.includes(TARGET_MONTH)) return;
-    if (seenBlocks.has(text)) return;
-    seenBlocks.add(text);
-    deals.push(text);
+    const saleId = $el.attr("data-saleid") || "";
+    const title = $el.find(".card__title").text().replace(/\s+/g, " ").trim();
+    const description = $el.find(".card__description").text().replace(/\s+/g, " ").trim();
+    const price = $el.find(".ux-ui-price").first().text().trim();
+    const priceNote = $el.find(".card__price-info-note").text().replace(/\s+/g, " ").trim();
+
+    let startDate = null, endDate = null;
+    const scriptText = $el.next("script.sale-script").text() || $el.find("script.sale-script").text();
+    const startMatch = scriptText.match(/"SaleStartDateStr":"(\d{4}-\d{2}-\d{2})"/);
+    const endMatch = scriptText.match(/"SaleEndDateStr":"(\d{4}-\d{2}-\d{2})"/);
+    if (startMatch) startDate = startMatch[1];
+    if (endMatch) endDate = endMatch[1];
+
+    const matchesMonth = dateRangeOverlapsTarget(startDate, endDate)
+      || /\b\d{1,2}([-/]\d{1,2})?\/0?5\/\d{2,4}/.test(description);
+
+    if (!matchesMonth) return;
+
+    deals.push({ saleId, title, description, price, priceNote, startDate, endDate });
   });
 
   return deals;
@@ -75,17 +96,17 @@ function findDeals(html) {
   const html = await res.text();
   const deals = findDeals(html);
 
-  console.log(`Found ${deals.length} matching deals`);
+  console.log(`Found ${deals.length} matching ${HOTEL_LABEL} deals for ${TARGET_MONTH}/${TARGET_YEAR}`);
 
   const state = loadState();
   const seen = new Set(state.seen);
   const newDeals = [];
 
   for (const d of deals) {
-    const h = hashDeal(d);
-    if (!seen.has(h)) {
-      newDeals.push({ hash: h, text: d });
-      seen.add(h);
+    const key = hashStr(`${d.saleId}|${d.title}|${d.description}|${d.price}`);
+    if (!seen.has(key)) {
+      newDeals.push({ key, deal: d });
+      seen.add(key);
     }
   }
 
@@ -94,10 +115,20 @@ function findDeals(html) {
     return;
   }
 
-  for (const d of newDeals) {
-    const msg = `🏨 <b>דיל חדש ברויאל ביץ' אילת (מאי)</b>\n\n${d.text}\n\n<a href="${URL}">לעמוד הדילים</a>`;
-    await sendTelegram(msg);
-    console.log(`Notified: ${d.hash}`);
+  for (const { key, deal } of newDeals) {
+    const lines = [
+      `🏨 <b>דיל חדש - ${HOTEL_LABEL}</b>`,
+      "",
+      `<b>${deal.title}</b>`,
+      deal.description,
+      "",
+      deal.price ? `💰 ${deal.price} ₪ ${deal.priceNote}` : "",
+      deal.startDate ? `📅 ${deal.startDate} → ${deal.endDate || ""}` : "",
+      "",
+      `<a href="${URL}">לעמוד הדילים</a>`,
+    ].filter(Boolean);
+    await sendTelegram(lines.join("\n"));
+    console.log(`Notified: ${key}`);
   }
 
   state.seen = Array.from(seen).slice(-500);
