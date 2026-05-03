@@ -1,0 +1,12 @@
+{
+  "name": "isrotel-deal-watcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0"
+  }
+}
